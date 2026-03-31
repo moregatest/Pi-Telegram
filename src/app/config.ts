@@ -1,7 +1,35 @@
 // src/app/config.ts — settings file creation, loading, normalization, and persistence
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { settingsPath, defaultWorkspace } from "./paths.js";
-import type { AppConfig, CronConfig } from "../shared/types.js";
+import { paths, settingsPath, defaultWorkspace } from "./paths.js";
+import type { AppConfig, CronConfig, LocalConfig, ResolvedConfig } from "../shared/types.js";
+
+export function parseEnvFile(filePath: string): Record<string, string> {
+  const content = readFileSync(filePath, "utf-8");
+  const result: Record<string, string> = {};
+
+  for (const line of content.split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith("#")) continue;
+
+    const eqIndex = trimmed.indexOf("=");
+    if (eqIndex < 1) continue;
+
+    const key = trimmed.slice(0, eqIndex).trim();
+    let value = trimmed.slice(eqIndex + 1).trim();
+
+    // Strip surrounding quotes
+    if (
+      (value.startsWith('"') && value.endsWith('"')) ||
+      (value.startsWith("'") && value.endsWith("'"))
+    ) {
+      value = value.slice(1, -1);
+    }
+
+    result[key] = value;
+  }
+
+  return result;
+}
 
 function getResolvedTimezone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -38,6 +66,19 @@ export function createDefaultSettingsTemplate(appVersion: string): AppConfig {
   };
 }
 
+export function createLocalSettingsTemplate(appVersion: string): LocalConfig {
+  const cron = getDefaultCronConfig();
+  return {
+    name: "Pi-Telegram",
+    allowedUsers: [],
+    idleTimeoutMs: 600000,
+    maxResponseLength: 4000,
+    streamByChat: {},
+    lastChangelogVersion: appVersion,
+    cron,
+  };
+}
+
 export function ensureSettingsFileExists(appVersion: string): boolean {
   if (existsSync(settingsPath)) return false;
   const template = createDefaultSettingsTemplate(appVersion);
@@ -45,8 +86,65 @@ export function ensureSettingsFileExists(appVersion: string): boolean {
   return true;
 }
 
+export function ensureLocalSettingsFileExists(appVersion: string): boolean {
+  if (existsSync(paths.settingsPath)) return false;
+  const template = createLocalSettingsTemplate(appVersion);
+  writeFileSync(paths.settingsPath, `${JSON.stringify(template, null, 2)}\n`, "utf-8");
+  return true;
+}
+
 export function readAppConfig(): AppConfig {
   return JSON.parse(readFileSync(settingsPath, "utf-8")) as AppConfig;
+}
+
+export function readLocalConfig(cwd: string, envFilePath: string): { config: ResolvedConfig; raw: LocalConfig } {
+  const env = parseEnvFile(envFilePath);
+  const token = env.TELEGRAM_BOT_TOKEN ?? "";
+
+  const raw: LocalConfig = existsSync(paths.settingsPath)
+    ? JSON.parse(readFileSync(paths.settingsPath, "utf-8")) as LocalConfig
+    : {};
+
+  const normalizedCron = normalizeCronConfig(raw.cron);
+  const normalizedStream = normalizeStreamByChat(raw.streamByChat);
+
+  const config: ResolvedConfig = {
+    mode: "local",
+    token,
+    name: raw.name || "Pi-Telegram",
+    allowedUsers: raw.allowedUsers ?? [],
+    cwd,
+    streamByChat: normalizedStream.value,
+    idleTimeoutMs: raw.idleTimeoutMs || 600000,
+    maxResponseLength: raw.maxResponseLength || 4000,
+    lastChangelogVersion: raw.lastChangelogVersion,
+    cron: normalizedCron.value,
+  };
+
+  return { config, raw };
+}
+
+export function readLegacyConfig(): { config: ResolvedConfig; raw: AppConfig } {
+  const raw = readAppConfig();
+  const botCfg = raw.bots[0];
+
+  const normalizedCron = normalizeCronConfig(raw.cron);
+  const normalizedStream = normalizeStreamByChat(botCfg?.streamByChat);
+
+  const config: ResolvedConfig = {
+    mode: "legacy",
+    token: botCfg?.token ?? "",
+    name: botCfg?.name || "Pi-Telegram",
+    allowedUsers: botCfg?.allowedUsers ?? [],
+    cwd: botCfg?.cwd || defaultWorkspace,
+    streamByChat: normalizedStream.value,
+    idleTimeoutMs: raw.idleTimeoutMs || 600000,
+    maxResponseLength: raw.maxResponseLength || 4000,
+    lastChangelogVersion: raw.lastChangelogVersion,
+    cron: normalizedCron.value,
+  };
+
+  return { config, raw };
 }
 
 export function normalizeCronConfig(input: CronConfig | undefined): { value: Required<CronConfig>; changed: boolean } {
@@ -155,6 +253,29 @@ export function createSettingsWriter(config: AppConfig): () => Promise<void> {
   return () => {
     const task = settingsWriteQueue.then(() => {
       writeFileSync(settingsPath, `${JSON.stringify(config, null, 2)}\n`, "utf-8");
+    });
+
+    settingsWriteQueue = task.catch(() => {
+      // Keep queue chain alive for future writes.
+    });
+
+    return task;
+  };
+}
+
+export function createLocalSettingsWriter(config: ResolvedConfig, raw: LocalConfig): () => Promise<void> {
+  let settingsWriteQueue: Promise<void> = Promise.resolve();
+
+  return () => {
+    const task = settingsWriteQueue.then(() => {
+      raw.name = config.name;
+      raw.allowedUsers = config.allowedUsers;
+      raw.idleTimeoutMs = config.idleTimeoutMs;
+      raw.maxResponseLength = config.maxResponseLength;
+      raw.lastChangelogVersion = config.lastChangelogVersion;
+      raw.streamByChat = config.streamByChat;
+      raw.cron = config.cron;
+      writeFileSync(paths.settingsPath, `${JSON.stringify(raw, null, 2)}\n`, "utf-8");
     });
 
     settingsWriteQueue = task.catch(() => {
