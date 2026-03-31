@@ -25,3 +25,26 @@ export interface AppConfig {
   lastChangelogVersion?: string;
   cron?: CronConfig;
 }
+
+export interface LocalConfig {
+  name?: string;
+  allowedUsers?: (number | string)[];
+  idleTimeoutMs?: number;
+  maxResponseLength?: number;
+  lastChangelogVersion?: string;
+  streamByChat?: Record<string, boolean>;
+  cron?: CronConfig;
+}
+
+export interface ResolvedConfig {
+  mode: "local" | "legacy";
+  token: string;
+  name: string;
+  allowedUsers: (number | string)[];
+  cwd: string;
+  streamByChat: Record<string, boolean>;
+  idleTimeoutMs: number;
+  maxResponseLength: number;
+  lastChangelogVersion?: string;
+  cron: Required<CronConfig>;
+}
