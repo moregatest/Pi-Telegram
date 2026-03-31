@@ -1367,11 +1367,23 @@ export function createBot(opts: CreateBotOptions): Bot<BotContext> {
     }
   };
 
+  // Slash commands that should be forwarded to pi instead of being ignored
+  const passthroughCommands = ["img_gen"];
+  const isPassthroughCommand = (t: string) => {
+    const m = /^\/(\w+)/.exec(t);
+    return m !== null && passthroughCommands.includes(m[1]);
+  };
+
   // Text messages
   bot.on("message:text", async (tgCtx) => {
     const text = tgCtx.message.text;
     if (!text) return;
-    if (text.startsWith("/")) return;
+    if (text.startsWith("/") && !isPassthroughCommand(text)) return;
+
+    // Send immediate ACK for long-running passthrough commands
+    if (isPassthroughCommand(text)) {
+      await tgCtx.reply("🖼️ 开始生成图片，请稍候，这通常需要几十秒。");
+    }
 
     const pending = cronPendingInput.get(tgCtx.chat.id);
     if (pending) {
