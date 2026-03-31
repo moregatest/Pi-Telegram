@@ -7,6 +7,7 @@ import { createBot } from "../telegram/create-bot.js";
 import { CronService } from "../cron/service.js";
 import { log } from "../shared/log.js";
 import { getRegisteredToolSystemPrompt } from "../telegram/tool-prompt.js";
+import type { ResolvedConfig } from "../shared/types.js";
 import {
   checkLatestVersion,
   getNewChangelogText,
@@ -14,8 +15,15 @@ import {
   getUpdateInstruction,
   shouldCheckUpdatesOnStartup,
 } from "../shared/version.js";
-import { createSettingsWriter, ensureSettingsFileExists, normalizeCronConfig, normalizeStreamByChat, readAppConfig } from "./config.js";
-import { cronRoot, defaultWorkspace, ensureAppDirectories, sessionsRoot, settingsPath, telegramRoot } from "./paths.js";
+import {
+  createLocalSettingsWriter,
+  createSettingsWriter,
+  ensureLocalSettingsFileExists,
+  ensureSettingsFileExists,
+  readLegacyConfig,
+  readLocalConfig,
+} from "./config.js";
+import { cronRoot, ensureAppDirectories, paths, sessionsRoot, telegramRoot } from "./paths.js";
 
 const bots: Array<{ stop: () => Promise<void> }> = [];
 const pools: PiPool[] = [];
@@ -157,31 +165,61 @@ export async function runApp(): Promise<void> {
 
   const { name: packageName, version: appVersion } = getPackageMeta();
 
-  if (ensureSettingsFileExists(appVersion)) {
-    log.warn(`settings.json 不存在，已自动生成模板: ${settingsPath}`);
-    log.warn("请先填写 bot token，再重新启动。\n");
-    process.exit(1);
-    return;
+  // ── Mode-specific config loading ──
+
+  let resolved: ResolvedConfig;
+  let queueWriteSettings: () => Promise<void>;
+
+  if (paths.mode === "local") {
+    // Local mode: token from .env, settings from cwd/settings.json
+    if (ensureLocalSettingsFileExists(appVersion)) {
+      log.warn(`settings.json 不存在，已自动生成模板: ${paths.settingsPath}`);
+      log.warn("请检查配置后再重新启动。\n");
+      process.exit(1);
+      return;
+    }
+
+    const { config, raw } = readLocalConfig(process.cwd(), paths.envFilePath!);
+
+    if (!config.token || config.token.includes("<") || config.token.includes(">")) {
+      log.error("config", "请在 .env 中填入有效的 TELEGRAM_BOT_TOKEN");
+      process.exit(1);
+      return;
+    }
+
+    resolved = config;
+    queueWriteSettings = createLocalSettingsWriter(config, raw);
+  } else {
+    // Legacy mode: everything from ~/.pi/telegram/settings.json
+    if (ensureSettingsFileExists(appVersion)) {
+      log.warn(`settings.json 不存在，已自动生成模板: ${paths.settingsPath}`);
+      log.warn("请先填写 bot token，再重新启动。\n");
+      process.exit(1);
+      return;
+    }
+
+    const { config, raw } = readLegacyConfig();
+    resolved = config;
+    queueWriteSettings = createSettingsWriter(raw);
   }
 
-  const config = readAppConfig();
   let needsSettingsRewrite = false;
 
-  log.boot(`Pi-Telegram v${appVersion}`);
+  log.boot(`Pi-Telegram v${appVersion} (${paths.mode} mode)`);
 
-  if (!config.lastChangelogVersion) {
-    config.lastChangelogVersion = appVersion;
+  if (!resolved.lastChangelogVersion) {
+    resolved.lastChangelogVersion = appVersion;
     needsSettingsRewrite = true;
-  } else if (config.lastChangelogVersion !== appVersion) {
-    const changelogText = getNewChangelogText(config.lastChangelogVersion);
+  } else if (resolved.lastChangelogVersion !== appVersion) {
+    const changelogText = getNewChangelogText(resolved.lastChangelogVersion);
     if (changelogText) {
-      log.warn(`检测到新版本变更（${config.lastChangelogVersion} -> ${appVersion}）：`);
+      log.warn(`检测到新版本变更（${resolved.lastChangelogVersion} -> ${appVersion}）：`);
       for (const line of changelogText.split(/\r?\n/)) {
         if (line.trim()) log.warn(line);
       }
     }
 
-    config.lastChangelogVersion = appVersion;
+    resolved.lastChangelogVersion = appVersion;
     needsSettingsRewrite = true;
   }
 
@@ -193,13 +231,7 @@ export async function runApp(): Promise<void> {
     });
   }
 
-  const normalizedCron = normalizeCronConfig(config.cron);
-  config.cron = normalizedCron.value;
-  if (normalizedCron.changed) {
-    needsSettingsRewrite = true;
-  }
-
-  const queueWriteSettings = createSettingsWriter(config);
+  // ── Tool system prompt ──
 
   const toolSystemPrompt = getRegisteredToolSystemPrompt().trim();
   const toolSystemPromptFile = resolve(telegramRoot, "tool-system-prompt.txt");
@@ -208,76 +240,73 @@ export async function runApp(): Promise<void> {
   }
   const toolSystemPromptArg = toolSystemPrompt ? toolSystemPromptFile : "";
 
-  for (let i = 0; i < config.bots.length; i++) {
-    const botCfg = config.bots[i];
-    const hasStreamByChat = Object.prototype.hasOwnProperty.call(botCfg, "streamByChat");
-    const normalizedStream = normalizeStreamByChat(botCfg.streamByChat);
-    botCfg.streamByChat = normalizedStream.value;
-    if (!hasStreamByChat || normalizedStream.changed) {
-      needsSettingsRewrite = true;
-    }
+  // ── Single bot startup ──
 
-    const cwd = botCfg.cwd || defaultWorkspace;
-    const botName = botCfg.name || `bot${i}`;
-    const sessionBaseDir = resolve(sessionsRoot, botName);
+  const botName = resolved.name || "Pi-Telegram";
+  const sessionBaseDir = resolve(sessionsRoot, botName);
 
-    const pool = new PiPool({
-      cwd,
-      piArgs: [],
-      appendSystemPrompt: toolSystemPromptArg,
-      sessionBaseDir,
-      idleTimeoutMs: config.idleTimeoutMs || 600_000,
-    });
-    pools.push(pool);
+  const pool = new PiPool({
+    cwd: resolved.cwd,
+    piArgs: [],
+    appendSystemPrompt: toolSystemPromptArg,
+    sessionBaseDir,
+    idleTimeoutMs: resolved.idleTimeoutMs,
+  });
+  pools.push(pool);
 
-    const cronStorePath = resolve(cronRoot, botName, "jobs.json");
-    const cronCfg = normalizedCron.value;
-    const cron = new CronService({
-      storePath: cronStorePath,
-      botName,
-      enabled: cronCfg.enabled,
-      defaultTimezone: cronCfg.defaultTimezone,
-      maxJobsPerChat: cronCfg.maxJobsPerChat,
-      maxRunMs: cronCfg.maxRunSeconds * 1000,
-      defaultPolicy: {
-        maxLatenessMs: cronCfg.maxLatenessMs,
-        retryMax: cronCfg.retryMax,
-        retryBackoffMs: cronCfg.retryBackoffMs,
-        deleteAfterRun: true,
-      },
-    });
+  const cronStorePath = resolve(cronRoot, botName, "jobs.json");
+  const cronCfg = resolved.cron;
+  const cronService = new CronService({
+    storePath: cronStorePath,
+    botName,
+    enabled: cronCfg.enabled,
+    defaultTimezone: cronCfg.defaultTimezone,
+    maxJobsPerChat: cronCfg.maxJobsPerChat,
+    maxRunMs: cronCfg.maxRunSeconds * 1000,
+    defaultPolicy: {
+      maxLatenessMs: cronCfg.maxLatenessMs,
+      retryMax: cronCfg.retryMax,
+      retryBackoffMs: cronCfg.retryBackoffMs,
+      deleteAfterRun: true,
+    },
+  });
 
-    const bot = createBot({
-      botIndex: i,
-      config: botCfg,
-      pool,
-      cron,
-      maxResponseLength: config.maxResponseLength || 4000,
-      initialStreamByChat: botCfg.streamByChat,
-      onStreamModeChange: async (chatId, enabled) => {
-        const key = String(chatId);
-        const prev = botCfg.streamByChat?.[key];
-        if (prev === enabled) return;
+  const bot = createBot({
+    botIndex: 0,
+    config: {
+      token: resolved.token,
+      name: botName,
+      allowedUsers: resolved.allowedUsers,
+      cwd: resolved.cwd,
+      streamByChat: resolved.streamByChat,
+    },
+    pool,
+    cron: cronService,
+    maxResponseLength: resolved.maxResponseLength,
+    initialStreamByChat: resolved.streamByChat,
+    onStreamModeChange: async (chatId, enabled) => {
+      const key = String(chatId);
+      const prev = resolved.streamByChat?.[key];
+      if (prev === enabled) return;
 
-        botCfg.streamByChat = botCfg.streamByChat ?? {};
-        botCfg.streamByChat[key] = enabled;
+      resolved.streamByChat = resolved.streamByChat ?? {};
+      resolved.streamByChat[key] = enabled;
 
-        try {
-          await queueWriteSettings();
-        } catch (err) {
-          log.error("config", `保存流式配置失败 (${botCfg.name}:${key}=${enabled ? 1 : 0}): ${formatErr(err)}`);
-          throw err;
-        }
-      },
-    });
+      try {
+        await queueWriteSettings();
+      } catch (err) {
+        log.error("config", `保存流式配置失败 (${botName}:${key}=${enabled ? 1 : 0}): ${formatErr(err)}`);
+        throw err;
+      }
+    },
+  });
 
-    await cron.start();
-    cronServices.push(cron);
+  await cronService.start();
+  cronServices.push(cronService);
 
-    const handle = startRunnerWithAutoRestart(bot, botName);
-    bots.push(handle);
-    log.boot(`"${botName}" started`);
-  }
+  const handle = startRunnerWithAutoRestart(bot, botName);
+  bots.push(handle);
+  log.boot(`"${botName}" started`);
 
   if (needsSettingsRewrite) {
     queueWriteSettings().catch((err) => {
@@ -288,5 +317,5 @@ export async function runApp(): Promise<void> {
   process.on("SIGINT", shutdown);
   process.on("SIGTERM", shutdown);
 
-  log.boot(`${bots.length} bot(s) running. Ctrl+C to stop.`);
+  log.boot(`1 bot running. Ctrl+C to stop.`);
 }
