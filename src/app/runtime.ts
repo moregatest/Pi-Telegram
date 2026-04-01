@@ -3,6 +3,7 @@ import { writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { run, type RunnerHandle } from "@grammyjs/runner";
 import { PiPool } from "../pi/pool.js";
+import { discoverSkills } from "../pi/discover.js";
 import { createBot } from "../telegram/create-bot.js";
 import { CronService } from "../cron/service.js";
 import { log } from "../shared/log.js";
@@ -240,6 +241,20 @@ export async function runApp(): Promise<void> {
   }
   const toolSystemPromptArg = toolSystemPrompt ? toolSystemPromptFile : "";
 
+  // ── Discover pi skills ──
+
+  const skillNames = await discoverSkills({
+    cwd: resolved.cwd,
+    piArgs: [],
+    appendSystemPrompt: toolSystemPromptArg,
+  });
+
+  if (skillNames.length > 0) {
+    log.boot(`发现 ${skillNames.length} 个技能: ${skillNames.join(", ")}`);
+  } else {
+    log.warn("未发现任何 pi 技能，所有 slash 命令将被忽略");
+  }
+
   // ── Single bot startup ──
 
   const botName = resolved.name || "Pi-Telegram";
@@ -284,6 +299,7 @@ export async function runApp(): Promise<void> {
     cron: cronService,
     maxResponseLength: resolved.maxResponseLength,
     initialStreamByChat: resolved.streamByChat,
+    skillNames,
     onStreamModeChange: async (chatId, enabled) => {
       const key = String(chatId);
       const prev = resolved.streamByChat?.[key];
