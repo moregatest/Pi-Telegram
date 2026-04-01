@@ -7,6 +7,22 @@
 Pi-Telegram 是一个桥接程序。
 它把 Telegram 机器人收到的消息转给 pi coding agent，再把结果发回 Telegram。
 
+> **Fork 说明**：本仓库基于 [Ziphyrien/Pi-Telegram](https://github.com/Ziphyrien/Pi-Telegram) 进行了以下增强，适用于需要在 Telegram 上快速调用 pi 技能（如图片生成）和目录级独立部署的场景。
+
+### 新增功能
+
+**本地模式（Local Mode）**
+支持以项目目录为单位独立部署 bot。在任意目录下放置 `.env`（含 `TELEGRAM_BOT_TOKEN`）和 `settings.json`，即可启动一个独立的 bot 实例，运行数据存放在 `cwd/pitg/` 下，不依赖 `~/.pi/telegram/` 全局目录。适合一机多 bot、按项目隔离的部署方式。
+
+**自动技能发现（Auto Skill Discovery）**
+bot 启动时自动调用 pi 的 `get_commands` RPC 探测已加载的技能（skills），无需在代码中硬编码。新增或移除 pi 技能后，重启 bot 即可生效。
+
+**Telegram 命令菜单整合**
+发现的技能会自动注册到 Telegram 的 `/` 命令菜单中，显示技能名称和描述。用户可以直接从菜单选取技能，bot 会提示输入内容，拼接后自动发送给 pi 执行。
+
+**告警静默化**
+附件解析和回复匹配的非关键告警（如 `<tg-reply>` 未匹配到目标消息）不再发送到 Telegram 聊天，改为仅记录在服务端日志中。实际错误（如附件发送失败、pi 执行出错）仍会通知用户。
+
 ## 它能做什么
 
 - 在 Telegram 聊天里直接使用 pi
