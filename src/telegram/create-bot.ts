@@ -46,6 +46,7 @@ export interface CreateBotOptions {
   maxResponseLength: number;
   initialStreamByChat?: Record<string, boolean>;
   onStreamModeChange?: (chatId: number, enabled: boolean) => Promise<void> | void;
+  skillNames?: string[];
 }
 
 export function createBot(opts: CreateBotOptions): Bot<BotContext> {
@@ -57,6 +58,7 @@ export function createBot(opts: CreateBotOptions): Bot<BotContext> {
     maxResponseLength,
     initialStreamByChat,
     onStreamModeChange,
+    skillNames = [],
   } = opts;
   const bot = new Bot<BotContext>(config.token);
   const botKey = createHash("sha1").update(config.token).digest("hex").slice(0, 12);
@@ -1367,11 +1369,11 @@ export function createBot(opts: CreateBotOptions): Bot<BotContext> {
     }
   };
 
-  // Slash commands that should be forwarded to pi instead of being ignored
-  const passthroughCommands = ["img_gen"];
+  // Build passthrough set from discovered pi skills (kebab-case → underscore)
+  const passthroughSet = new Set(skillNames.map((s) => s.replace(/-/g, "_")));
   const isPassthroughCommand = (t: string) => {
     const m = /^\/(\w+)/.exec(t);
-    return m !== null && passthroughCommands.includes(m[1]);
+    return m !== null && passthroughSet.has(m[1]);
   };
 
   // Text messages
@@ -1380,9 +1382,8 @@ export function createBot(opts: CreateBotOptions): Bot<BotContext> {
     if (!text) return;
     if (text.startsWith("/") && !isPassthroughCommand(text)) return;
 
-    // Send immediate ACK for long-running passthrough commands
     if (isPassthroughCommand(text)) {
-      await tgCtx.reply("🖼️ 开始生成图片，请稍候，这通常需要几十秒。");
+      await tgCtx.reply("⏳ 正在处理，请稍候...");
     }
 
     const pending = cronPendingInput.get(tgCtx.chat.id);
