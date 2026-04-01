@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### New Features
+
+- **Auto skill discovery**: Bot startup now calls pi's `get_commands` RPC to discover loaded skills automatically, replacing the hardcoded `/img_gen` passthrough.
+- **Skill command menu**: Discovered skills appear in Telegram's `/` command menu with descriptions, enabling tap-to-select.
+- **Pending prompt input**: Tapping a skill from the menu sends the command without arguments; the bot prompts for input and prepends the command automatically on the next message.
+
+### Changed
+
+- Attachment/reply parsing warnings are now logged server-side only, no longer sent to Telegram chat.
+
 ## [0.3.1] - 2026-03-12
 
 ### Fixed

@@ -243,14 +243,14 @@ export async function runApp(): Promise<void> {
 
   // ── Discover pi skills ──
 
-  const skillNames = await discoverSkills({
+  const discoveredSkills = await discoverSkills({
     cwd: resolved.cwd,
     piArgs: [],
     appendSystemPrompt: toolSystemPromptArg,
   });
 
-  if (skillNames.length > 0) {
-    log.boot(`发现 ${skillNames.length} 个技能: ${skillNames.join(", ")}`);
+  if (discoveredSkills.length > 0) {
+    log.boot(`发现 ${discoveredSkills.length} 个技能: ${discoveredSkills.map((s) => s.name.replace(/-/g, "_")).join(", ")}`);
   } else {
     log.warn("未发现任何 pi 技能，所有 slash 命令将被忽略");
   }
@@ -299,7 +299,7 @@ export async function runApp(): Promise<void> {
     cron: cronService,
     maxResponseLength: resolved.maxResponseLength,
     initialStreamByChat: resolved.streamByChat,
-    skillNames,
+    discoveredSkills,
     onStreamModeChange: async (chatId, enabled) => {
       const key = String(chatId);
       const prev = resolved.streamByChat?.[key];

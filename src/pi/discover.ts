@@ -17,7 +17,12 @@ interface DiscoverOptions {
   appendSystemPrompt?: string;
 }
 
-export async function discoverSkills(opts: DiscoverOptions): Promise<string[]> {
+export interface DiscoveredSkill {
+  name: string;
+  description: string;
+}
+
+export async function discoverSkills(opts: DiscoverOptions): Promise<DiscoveredSkill[]> {
   const args = ["--mode", "rpc", "--no-session", ...opts.piArgs];
 
   const append = (opts.appendSystemPrompt || "").trim();
@@ -29,7 +34,7 @@ export async function discoverSkills(opts: DiscoverOptions): Promise<string[]> {
   const cmd = isWin ? "cmd.exe" : "pi";
   const cmdArgs = isWin ? ["/d", "/s", "/c", "pi", ...args] : args;
 
-  return new Promise<string[]>((resolve) => {
+  return new Promise<DiscoveredSkill[]>((resolve) => {
     const proc = spawn(cmd, cmdArgs, {
       cwd: opts.cwd,
       stdio: ["pipe", "pipe", "pipe"],
@@ -38,7 +43,7 @@ export async function discoverSkills(opts: DiscoverOptions): Promise<string[]> {
     const timeout = setTimeout(() => {
       log.warn("skill 探测超时（10s），跳过");
       cleanup();
-      resolve([]);
+      resolve([] as DiscoveredSkill[]);
     }, 10_000);
 
     let settled = false;
@@ -67,7 +72,10 @@ export async function discoverSkills(opts: DiscoverOptions): Promise<string[]> {
         const commands: RpcSlashCommand[] = event.data?.commands ?? [];
         const skills = commands
           .filter((c) => c.source === "skill")
-          .map((c) => c.name.replace(/^skill:/, ""));
+          .map((c) => ({
+            name: c.name.replace(/^skill:/, ""),
+            description: c.description || "",
+          }));
 
         cleanup();
         resolve(skills);

@@ -12,6 +12,7 @@ import { hydrateFiles } from "@grammyjs/files";
 import { CommandGroup } from "@grammyjs/commands";
 import { Menu } from "@grammyjs/menu";
 import { autoChatAction, type AutoChatActionFlavor } from "@grammyjs/auto-chat-action";
+import type { DiscoveredSkill } from "../pi/discover.js";
 import { log } from "../shared/log.js";
 import { mdToPlainText, mdToTgHtml } from "./format.js";
 import { createBotMenus } from "./menu.js";
@@ -46,7 +47,7 @@ export interface CreateBotOptions {
   maxResponseLength: number;
   initialStreamByChat?: Record<string, boolean>;
   onStreamModeChange?: (chatId: number, enabled: boolean) => Promise<void> | void;
-  skillNames?: string[];
+  discoveredSkills?: DiscoveredSkill[];
 }
 
 export function createBot(opts: CreateBotOptions): Bot<BotContext> {
@@ -58,7 +59,7 @@ export function createBot(opts: CreateBotOptions): Bot<BotContext> {
     maxResponseLength,
     initialStreamByChat,
     onStreamModeChange,
-    skillNames = [],
+    discoveredSkills = [],
   } = opts;
   const bot = new Bot<BotContext>(config.token);
   const botKey = createHash("sha1").update(config.token).digest("hex").slice(0, 12);
@@ -429,9 +430,7 @@ export function createBot(opts: CreateBotOptions): Bot<BotContext> {
     const scope = await getCronReplyScope(chatId);
 
     if (prepared.warnings.length) {
-      const preview = prepared.warnings.slice(0, 3).join("\n");
-      const more = prepared.warnings.length > 3 ? `\n... 还有 ${prepared.warnings.length - 3} 条` : "";
-      await bot.api.sendMessage(chatId, `⚠️ 附件解析告警：\n${preview}${more}`).catch(() => {});
+      for (const w of prepared.warnings) log.warn(`附件解析: ${w}`);
     }
 
     if (prepared.body.trim()) {
@@ -1370,17 +1369,49 @@ export function createBot(opts: CreateBotOptions): Bot<BotContext> {
   };
 
   // Build passthrough set from discovered pi skills (kebab-case → underscore)
-  const passthroughSet = new Set(skillNames.map((s) => s.replace(/-/g, "_")));
+  const passthroughSet = new Set(discoveredSkills.map((s) => s.name.replace(/-/g, "_")));
   const isPassthroughCommand = (t: string) => {
     const m = /^\/(\w+)/.exec(t);
     return m !== null && passthroughSet.has(m[1]);
   };
+  const getSkillArgs = (t: string) => {
+    const m = /^\/\w+\s*(.*)$/s.exec(t);
+    return m ? m[1].trim() : "";
+  };
+  const skillPendingCommand = new Map<number, string>(); // chatId → "/cmd"
 
   // Text messages
   bot.on("message:text", async (tgCtx) => {
     const text = tgCtx.message.text;
     if (!text) return;
+
+    // Check if this is a follow-up prompt for a pending skill command
+    const pendingCmd = skillPendingCommand.get(tgCtx.chat.id);
+    if (pendingCmd && !text.startsWith("/")) {
+      skillPendingCommand.delete(tgCtx.chat.id);
+      const fullText = `${pendingCmd} ${text}`;
+      await tgCtx.reply("⏳ 正在处理，请稍候...");
+
+      rememberReplyMessage(replyScopeKey(tgCtx), "user", tgCtx.message.message_id, fullText);
+      rememberReferencedReply(tgCtx);
+
+      const key = chatKey(botKey, tgCtx.chat.id);
+      const inst = pool.get(key);
+
+      await runPromptRequest(tgCtx, inst, async ({ supportsImages }) =>
+        buildPromptPayloadWithReplyContext(tgCtx, fullText, config.token, supportsImages),
+      );
+      return;
+    }
+
     if (text.startsWith("/") && !isPassthroughCommand(text)) return;
+
+    // Passthrough command without arguments → ask for prompt
+    if (isPassthroughCommand(text) && !getSkillArgs(text)) {
+      skillPendingCommand.set(tgCtx.chat.id, text.trim());
+      await tgCtx.reply("📝 请输入内容：");
+      return;
+    }
 
     if (isPassthroughCommand(text)) {
       await tgCtx.reply("⏳ 正在处理，请稍候...");
@@ -1467,8 +1498,17 @@ export function createBot(opts: CreateBotOptions): Bot<BotContext> {
     });
   });
 
-  // Sync command menu from command group definitions
+  // Sync command menu: built-in commands + discovered skills
   commandGroup.setCommands(bot)
+    .then(async () => {
+      if (!discoveredSkills.length) return;
+      const existing = await bot.api.getMyCommands();
+      const skillCommands = discoveredSkills.map((s) => ({
+        command: s.name.replace(/-/g, "_"),
+        description: s.description || s.name,
+      }));
+      await bot.api.setMyCommands([...existing, ...skillCommands]);
+    })
     .catch((err) => log.error(`bot${botIndex}`, `setCommands: ${err}`));
 
   return bot;
@@ -2279,9 +2319,7 @@ async function sendAttachments(
   replyParameters?: ReplyParameters,
 ): Promise<void> {
   if (warnings.length) {
-    const preview = warnings.slice(0, 3).join("\n");
-    const more = warnings.length > 3 ? `\n... 还有 ${warnings.length - 3} 条` : "";
-    await tgCtx.reply(`⚠️ 附件解析告警：\n${preview}${more}`).catch(() => {});
+    for (const w of warnings) log.warn(`附件解析: ${w}`);
   }
 
   let first = true;
