@@ -72,6 +72,8 @@ function startRunnerWithAutoRestart(
 ): { stop: () => Promise<void> } {
   let runner: RunnerHandle | null = null;
   let retryTimer: ReturnType<typeof setTimeout> | null = null;
+  let consecutive409 = 0;
+  const MAX_409_RETRIES = 5;
 
   const scheduleRestart = (reason: string, delayMs = 5000) => {
     if (shuttingDown) return;
@@ -108,8 +110,13 @@ function startRunnerWithAutoRestart(
         }
 
         if (code === 409) {
-          log.warn(`"${botName}" 可能存在重复实例（同 token 多进程轮询）`);
-          scheduleRestart("runner crashed code=409", 15000);
+          consecutive409++;
+          log.warn(`"${botName}" 可能存在重复实例（同 token 多进程轮询）[${consecutive409}/${MAX_409_RETRIES}]`);
+          if (consecutive409 >= MAX_409_RETRIES) {
+            log.error("boot", `"${botName}" 连续 ${MAX_409_RETRIES} 次 409，退出进程让 pm2 重启`);
+            process.exit(1);
+          }
+          scheduleRestart("runner crashed code=409", 45000);
           return;
         }
 
@@ -125,6 +132,7 @@ function startRunnerWithAutoRestart(
           maxRetryTime: 7 * 24 * 60 * 60 * 1000,
         },
       });
+      consecutive409 = 0;
       watch(runner);
     } catch (err) {
       log.error("boot", `"${botName}" 启动轮询失败：${describeRunnerError(err)}`);
