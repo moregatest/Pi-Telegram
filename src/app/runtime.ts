@@ -7,6 +7,7 @@ import { discoverSkills } from "../pi/discover.js";
 import { createBot } from "../telegram/create-bot.js";
 import { CronService } from "../cron/service.js";
 import { log } from "../shared/log.js";
+import { createHeartbeatTransformer, heartbeatPath } from "./heartbeat.js";
 import { getRegisteredToolSystemPrompt } from "../telegram/tool-prompt.js";
 import type { ResolvedConfig } from "../shared/types.js";
 import {
@@ -324,6 +325,9 @@ export async function runApp(): Promise<void> {
       }
     },
   });
+
+  bot.api.config.use(createHeartbeatTransformer(botName));
+  log.boot(`heartbeat -> ${heartbeatPath(botName)}`);
 
   await cronService.start();
   cronServices.push(cronService);

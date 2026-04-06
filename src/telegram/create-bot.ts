@@ -1759,7 +1759,8 @@ async function downloadInboundFileByFileId(
     }
 
     return { fileId, localPath, contentHash };
-  } catch {
+  } catch (err) {
+    log.warn(`downloadInboundFile failed for fileId=${fileId.slice(0, 20)}…: ${(err as Error).message || err}`);
     return null;
   }
 }
@@ -2294,10 +2295,23 @@ async function sendPreparedReply(
         const sent = await tgCtx.reply(html, { parse_mode: "HTML", ...(opts ?? {}) });
         rememberReplyMessage(replyScopeKey(tgCtx), "self", sent.message_id, part);
       } catch (err) {
-        log.warn(`chat${tgCtx.chat?.id ?? 0} HTML 发送失败，降级纯文本：${describeTelegramSendError(err)}`);
+        const errDesc = describeTelegramSendError(err);
+        // Strip invalid quote from reply_parameters and retry
+        if (opts?.reply_parameters && errDesc.includes("QUOTE_TEXT_INVALID")) {
+          log.warn(`chat${tgCtx.chat?.id ?? 0} quote 无效，移除 quote 后重试`);
+          const { quote: _q, quote_position: _p, ...safeParams } = opts.reply_parameters;
+          const safeOpts = { reply_parameters: safeParams as ReplyParameters };
+          try {
+            const sent = await tgCtx.reply(html, { parse_mode: "HTML", ...safeOpts });
+            rememberReplyMessage(replyScopeKey(tgCtx), "self", sent.message_id, part);
+            continue;
+          } catch { /* fall through to plain text */ }
+        }
+        log.warn(`chat${tgCtx.chat?.id ?? 0} HTML 发送失败，降级纯文本：${errDesc}`);
         const safePart = stripProtocolTags(part);
         const plain = mdToPlainText(safePart);
-        const sent = await tgCtx.reply(plain, opts);
+        const safeOpts = stripQuoteFromOpts(opts);
+        const sent = await tgCtx.reply(plain, safeOpts);
         rememberReplyMessage(replyScopeKey(tgCtx), "self", sent.message_id, plain);
       }
       first = false;
@@ -2324,13 +2338,26 @@ async function sendAttachments(
 
   let first = true;
   for (const att of attachments) {
+    const opts = first && replyParameters
+      ? { reply_parameters: replyParameters }
+      : undefined;
     try {
-      const opts = first && replyParameters
-        ? { reply_parameters: replyParameters }
-        : undefined;
       await sendOneAttachment(tgCtx, att, opts);
     } catch (err) {
-      await tgCtx.reply(`❌ 附件发送失败：${att.label || "未知附件"}\n${(err as Error).message}`).catch(() => {});
+      const errMsg = (err as Error).message || "";
+      if (opts && errMsg.includes("QUOTE_TEXT_INVALID")) {
+        log.warn(`chat${tgCtx.chat?.id ?? 0} 附件 quote 无效，移除 quote 后重试`);
+        try {
+          await sendOneAttachment(tgCtx, att, stripQuoteFromOpts(opts));
+          first = false;
+          continue;
+        } catch (retryErr) {
+          await tgCtx.reply(`❌ 附件发送失败：${att.label || "未知附件"}\n${(retryErr as Error).message}`).catch(() => {});
+          first = false;
+          continue;
+        }
+      }
+      await tgCtx.reply(`❌ 附件发送失败：${att.label || "未知附件"}\n${errMsg}`).catch(() => {});
     }
     first = false;
   }
@@ -2348,6 +2375,12 @@ type ReplyMethodName =
 
 type MediaInput = TgAttachment["media"];
 type SendOther = { reply_parameters?: ReplyParameters };
+
+function stripQuoteFromOpts(opts?: { reply_parameters?: ReplyParameters }): typeof opts {
+  if (!opts?.reply_parameters?.quote) return opts;
+  const { quote: _q, quote_position: _p, ...rest } = opts.reply_parameters;
+  return { reply_parameters: rest as ReplyParameters };
+}
 
 const REPLY_BY_KIND: Record<TgAttachmentKind, ReplyMethodName> = {
   photo: "replyWithPhoto",

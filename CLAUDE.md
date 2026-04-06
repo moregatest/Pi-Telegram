@@ -86,6 +86,24 @@ Mode detection happens in `src/app/paths.ts`. Both modes produce a unified `Reso
 - `cron/<botName>/jobs.json` — persistent cron job store
 - `tool-system-prompt.txt` — generated system prompt for tag protocols
 
+## Pi Skills
+
+Skills live in `~/.pi/agent/skills/<name>/SKILL.md`. pi CLI does **not** auto-discover skills — the `--skill <path>` flag is required (Pi-Telegram passes this via RPC spawn args).
+
+### img-gen
+
+- **SKILL.md:** `~/.pi/agent/skills/img-gen/SKILL.md`
+- **Script:** `~/.pi/agent/skills/img-gen/scripts/generate-z-image-turbo.sh`
+- **Backend:** mflux z-image-turbo (768×1024, 8 steps)
+- **Prompt optimization:** SKILL.md contains a validated pose/movement vocabulary (contortion, horror, backbend terms) and a 5-layer prompt structure (subject → appearance → pose → background → style). Pi silently enhances user prompts before passing to the script.
+- **Testing:** Run from `~/pi-workspace/` with `pi -p --skill ~/.pi/agent/skills/img-gen "/img_gen <prompt>"`. Avoid running from project directories as cwd context can interfere.
+
+### Local LLM
+
+- **Server:** llama-server managed by pm2 (`~/.pm2/ecosystem.config.cjs`)
+- **Model:** `~/models/Qwen3.5-35B-A3B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf`
+- **Endpoint:** `http://127.0.0.1:8081/v1` (pi provider config in `~/.pi/agent/models.json`)
+
 ## Language & Conventions
 
 - TypeScript (ES2022, Node16 module resolution), ESM-only (`"type": "module"`)
